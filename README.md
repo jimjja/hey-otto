@@ -46,7 +46,7 @@ To update: `git pull && ./build.sh`.
 | (stay quiet after an answer) | Otto listens for about 7 s for a follow-up, with no wake word needed. |
 | (talk while it's speaking) | It pauses, listens, and takes what you say as the next request. |
 | “Hey Otto, stop” | Stops talking and the current reply. Background tasks keep running. |
-| “how's the … going?” · “also …” · “cancel …” | Check on, steer or cancel a background task. |
+| “how's the … going?” · “also …” · “cancel …” | Check on, steer or cancel a background task. Up to 5 run at once (menu → Tasks → Parallel Tasks); more wait in a queue. |
 | “summarize this” · “reply to this email” | The front window's text goes along with the request. |
 | Both ⌘ keys | Attach the front window (text and picture), then say what to do with it. |
 | ⌃⌥Space | Talk without the wake word. Press again to send right away. |
@@ -87,7 +87,10 @@ Otto works the way modern voice assistants like ChatGPT's desktop voice do: two 
 - **Voice layer:** a small, fast Claude Code process (Haiku, no tools) that only talks.
   - It starts, steers and cancels background tasks through tags that Otto keeps out of speech: `<task>`, `<steer>`, `<cancel>`.
   - Each message tells it what's running, so status questions are answered instantly.
-- **Workers:** each task is its own Claude Code process with full tools (`--chrome`, the shell, your MCP connectors). They run in parallel and keep their conversation for follow-ups. Permission questions reach Otto through Claude Code's host protocol.
+- **Workers:** each task is its own Claude Code process with full tools (`--chrome`, the shell, your MCP connectors).
+  - They run in parallel, up to a limit you set (5 by default); more wait in a queue. Each keeps its conversation for follow-ups.
+  - Permission questions reach Otto through Claude Code's host protocol.
+  - The task list and the voice conversation are saved (`~/Library/Application Support/Otto/state.json`), so a restart doesn't lose them. Tasks that were mid-work come back as interrupted, and asking about one continues its conversation.
 - **Audio:** one audio engine for the mic and the voice, with Apple's voice processing (echo cancellation, noise suppression).
   - Speech is rendered sentence by sentence with macOS's `say` and played through that engine, so it never hears itself.
   - When it hears your voice it pauses. Words confirm the interruption; a cough doesn't.

@@ -650,8 +650,8 @@ final class ClaudeSession {
     private(set) var busy = false
     private var process: Process?
     private var input: FileHandle?
-    private var sessionID: String?
-    private var lastUse = Date.distantPast
+    private(set) var sessionID: String?   // the Claude Code conversation: saved, so it can be resumed after a restart
+    private(set) var lastUse = Date.distantPast
     private var pending = Data()
     private var errorTail = ""
     private var answer = ""
@@ -700,6 +700,12 @@ final class ClaudeSession {
         guard let input, var line = try? JSONSerialization.data(withJSONObject: reply) else { return }
         line.append(0x0A)
         try? input.write(contentsOf: line)
+    }
+
+    /// Picks up a saved conversation: the next message resumes it (unless it has been idle longer than freshAfter).
+    func restore(sessionID: String?, lastUse: Date) {
+        guard process == nil else { return }
+        self.sessionID = sessionID; self.lastUse = lastUse
     }
 
     /// Lets an idle conversation's process go; the next message resumes it.
@@ -949,45 +955,67 @@ struct DirectiveFilter {
 }
 
 final class AgentTask {
-    enum Status: String { case running, finished, failed, cancelled }
+    /// queued: waiting for a free slot. interrupted: was queued or running when Otto quit; steering it continues it.
+    enum Status: String, Codable { case queued, running, finished, failed, cancelled, interrupted }
     let id: Int, title: String
-    var status = Status.running
+    var instruction: String   // what it was asked, kept so it can start later (queued) or start over (never started)
+    var image = ""
+    var next = ""   // the message to send when it gets a slot
+    var status = Status.queued
     var steps: [String] = []
     var result = ""
     var waiting: String?   // what it's waiting for the user's OK to do
     var started = Date(), ended: Date?
     let session = ClaudeSession()
-    init(id: Int, title: String) { self.id = id; self.title = title }
+    init(id: Int, title: String, instruction: String) { self.id = id; self.title = title; self.instruction = instruction }
 
+    var active: Bool { status == .running || status == .queued }
     var elapsed: String {
         let seconds = Int((ended ?? Date()).timeIntervalSince(started))
         return seconds < 60 ? "\(seconds) s" : "\(seconds / 60):\(String(format: "%02d", seconds % 60))"
     }
 }
 
-/// The background workers: each task is its own Claude Code conversation, running in parallel.
+/// A task as saved between runs of Otto.
+struct SavedTask: Codable {
+    let id: Int, title: String, instruction: String, status: AgentTask.Status
+    let steps: [String], result: String, started: Date, ended: Date?, sessionID: String?
+}
+
+/// The background workers: each task is its own Claude Code conversation. Up to `limit` run at once; the rest queue.
 final class TaskBoard {
     var onChange: () -> Void = {}
     var onStep: (AgentTask, String) -> Void = { _, _ in }
     var onFinished: (AgentTask) -> Void = { _ in }
     var onPermission: (PermissionRequest) -> Void = { _ in }
     var configure: (ClaudeSession) -> Void = { _ in }   // account, model and access, set by the app
+    var limit = 5 { didSet { startQueued() } }   // Settings: Parallel Tasks
     private(set) var tasks: [AgentTask] = []
-    private var nextID = 1
+    private(set) var nextID = 1
     private var reaper: Timer?
 
     var running: [AgentTask] { tasks.filter { $0.status == .running } }
+    var queued: [AgentTask] { tasks.filter { $0.status == .queued } }
 
     init() {
         reaper = Timer.scheduledTimer(withTimeInterval: 60, repeats: true) { [weak self] _ in   // idle workers let their process go
-            self?.tasks.filter { $0.status != .running && Date().timeIntervalSince($0.ended ?? Date()) > 600 }.forEach { $0.session.suspend() }
+            self?.tasks.filter { !$0.active && Date().timeIntervalSince($0.ended ?? Date()) > 600 }.forEach { $0.session.suspend() }
         }
     }
 
     @discardableResult
     func start(title: String, instruction: String, image: String = "") -> AgentTask {
-        let task = AgentTask(id: nextID, title: title)
+        let task = AgentTask(id: nextID, title: title, instruction: instruction)
         nextID += 1
+        task.image = image; task.next = instruction
+        wire(task)
+        tasks.append(task)
+        startQueued()
+        onChange()
+        return task
+    }
+
+    private func wire(_ task: AgentTask) {
         task.session.role = .worker
         task.session.freshAfter = .infinity   // a task keeps its conversation for follow-ups
         configure(task.session)
@@ -1009,44 +1037,88 @@ final class TaskBoard {
             task.status = failed ? .failed : .finished
             task.result = text; task.ended = Date()
             self.onChange(); self.onFinished(task)
+            self.startQueued()
         }
-        tasks.append(task)
-        task.session.send(instruction, image: image)
-        onChange()
-        return task
+    }
+
+    /// Fills free slots from the queue, oldest first.
+    private func startQueued() {
+        while running.count < limit, let task = queued.first {
+            task.status = .running; task.ended = nil; task.started = Date()
+            let image = task.session.sessionID == nil ? task.image : ""
+            task.session.send(task.next, image: image)
+            onChange()
+        }
     }
 
     @discardableResult
     func steer(_ id: Int, _ text: String) -> Bool {
         guard let task = tasks.first(where: { $0.id == id }), task.status != .cancelled else { return false }
-        task.status = .running; task.ended = nil
-        task.session.send(text)
+        switch task.status {
+        case .running:
+            task.session.send(text)   // Claude Code takes it after the current step
+        case .queued:
+            task.next += "\n\nAlso: " + text
+        default:   // finished, failed or interrupted: continue its conversation, or start it over if it never began
+            task.next = task.session.sessionID == nil ? task.instruction + "\n\nAlso: " + text : text
+            task.status = .queued
+            startQueued()
+        }
         onChange()
         return true
     }
 
     @discardableResult
     func cancel(_ id: Int) -> Bool {
-        guard let task = tasks.first(where: { $0.id == id }), task.status == .running else { return false }
+        guard let task = tasks.first(where: { $0.id == id }), task.active else { return false }
+        let wasRunning = task.status == .running
         task.status = .cancelled; task.ended = Date()
-        task.session.stop()
+        if wasRunning { task.session.stop() }
         onChange()
+        startQueued()
         return true
     }
 
     func shutdown() { tasks.forEach { $0.session.reset() } }
 
-    /// The [Tasks] lines for the voice layer: what's running, and what finished recently.
+    /// The task list to save: the last day's tasks.
+    func snapshot() -> [SavedTask] {
+        let day = Date().addingTimeInterval(-86400)
+        return tasks.filter { $0.active || ($0.ended ?? $0.started) > day }.map {
+            SavedTask(id: $0.id, title: $0.title, instruction: $0.instruction, status: $0.status, steps: Array($0.steps.suffix(5)),
+                      result: String($0.result.prefix(4000)), started: $0.started, ended: $0.ended, sessionID: $0.session.sessionID)
+        }
+    }
+
+    /// Brings back saved tasks. What was running or waiting is interrupted now: steering it continues it.
+    func restore(_ saved: [SavedTask], nextID: Int) {
+        for t in saved where !tasks.contains(where: { $0.id == t.id }) {
+            let task = AgentTask(id: t.id, title: t.title, instruction: t.instruction)
+            task.status = t.status == .running || t.status == .queued ? .interrupted : t.status
+            task.steps = t.steps; task.result = t.result; task.started = t.started
+            task.ended = task.status == .interrupted ? (t.ended ?? Date()) : t.ended
+            wire(task)
+            task.session.restore(sessionID: t.sessionID, lastUse: t.ended ?? t.started)
+            tasks.append(task)
+        }
+        self.nextID = max(self.nextID, nextID, (tasks.map(\.id).max() ?? 0) + 1)
+        onChange()
+    }
+
+    /// The [Tasks] lines for the voice layer: what's running or queued, and what ended recently.
     func summary(now: Date = Date()) -> String {
-        let recent = tasks.filter { $0.status == .running || now.timeIntervalSince($0.ended ?? now) < 1800 }
+        let recent = tasks.filter { $0.active || now.timeIntervalSince($0.ended ?? now) < 1800 }
         guard !recent.isEmpty else { return "" }
         let lines = recent.map { t -> String in
             switch t.status {
             case .running: return "#\(t.id) “\(t.title)”: running for \(t.elapsed)"
                 + (t.waiting.map { "; waiting for the user's OK to \($0)" } ?? t.steps.last.map { "; now: \($0)" } ?? "")
+            case .queued: return "#\(t.id) “\(t.title)”: queued; starts when one of the \(running.count) running tasks finishes (limit \(limit))"
             case .finished: return "#\(t.id) “\(t.title)”: finished \(Int(now.timeIntervalSince(t.ended ?? now) / 60)) min ago: \(t.result.prefix(300))"
             case .failed: return "#\(t.id) “\(t.title)”: failed: \(t.result.prefix(200))"
             case .cancelled: return "#\(t.id) “\(t.title)”: cancelled"
+            case .interrupted: return "#\(t.id) “\(t.title)”: interrupted when Otto quit" + (t.steps.last.map { " (last step: \($0))" } ?? "")
+                + "; steering it continues it"
             }
         }
         return "[Tasks]\n" + lines.joined(separator: "\n") + "\n[End of tasks]"
@@ -1967,8 +2039,9 @@ struct PanelView: View {
                 VStack(alignment: .leading, spacing: 5) {
                     ForEach(state.tasks, id: \.id) { task in
                         HStack(spacing: 7) {
-                            Image(systemName: task.status == .running ? "circle.dotted" : task.status == .finished ? "checkmark.circle.fill"
-                                  : task.status == .failed ? "exclamationmark.circle" : "xmark.circle")
+                            Image(systemName: task.status == .running ? "circle.dotted" : task.status == .queued ? "clock"
+                                  : task.status == .finished ? "checkmark.circle.fill" : task.status == .failed ? "exclamationmark.circle"
+                                  : task.status == .interrupted ? "pause.circle" : "xmark.circle")
                                 .font(.system(size: 11))
                                 .foregroundStyle(task.status == .finished ? Color.green.opacity(0.8) : task.status == .failed ? Color.orange : Color(white: 0.7))
                                 .symbolEffect(.pulse, isActive: task.status == .running)
@@ -2119,7 +2192,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var asking: PermissionRequest?, askedAt = Date.distantPast
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        defaults.register(defaults: ["wake": true, "wakePhrase": "Hey Otto", "followUp": true, "speak": true, "voice": "", "model": "", "freshMinutes": 15.0, "pause": 1.8, "echo": true, "claudeConfig": "", "twoLayer": true, "access": "ask"])
+        defaults.register(defaults: ["wake": true, "wakePhrase": "Hey Otto", "followUp": true, "speak": true, "voice": "", "model": "", "freshMinutes": 15.0, "pause": 1.8, "echo": true, "claudeConfig": "", "twoLayer": true, "access": "ask", "maxTasks": 5])
+        board.limit = max(1, defaults.integer(forKey: "maxTasks"))
         claude.configDir = ClaudeSession.resolveConfigDir(defaults.string(forKey: "claudeConfig") ?? "")
         listener.echoCancellation = defaults.bool(forKey: "echo")
         listener.pauseToEnd = defaults.double(forKey: "pause")
@@ -2172,11 +2246,12 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         voice.onText = { [weak self] text in self?.voiceText(text) }
         voice.onDone = { [weak self] text, failed in self?.voiceDone(text, failed) }
         board.onStep = { [weak self] task, step in self?.log.write("  #\(task.id) " + step) }
-        board.onChange = { [weak self] in self?.refreshTasks() }
+        board.onChange = { [weak self] in self?.refreshTasks(); self?.scheduleSave() }
         board.onFinished = { [weak self] task in self?.taskFinished(task) }
         board.onPermission = { [weak self] request in self?.permissionRequested(request) }
         claude.onPermission = { [weak self] request in self?.permissionRequested(request) }
         state.respond = { [weak self] allow in self?.answerPermission(allow) }
+        restoreState()   // tasks and the voice conversation from the last run
         doubleCommand = DoubleCommand { [weak self] in self?.attachWindow() }
         ticker = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in   // task clocks, and telling finished tasks
             guard let self else { return }
@@ -2225,7 +2300,47 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func cleanUp() {
         replyExpected = false
         speaker.stop()
+        saveState()
         claude.reset(); voice.reset(); board.shutdown()
+    }
+
+    // MARK: Saved between runs
+
+    struct SavedState: Codable {
+        var nextID: Int
+        var tasks: [SavedTask]
+        var voiceSession: String?, voiceLastUse: Date?
+    }
+
+    var stateURL: URL {
+        let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Otto")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir.appendingPathComponent("state.json")
+    }
+    var saveWork: DispatchWorkItem?
+
+    func scheduleSave() {
+        saveWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.saveState() }
+        saveWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1, execute: work)
+    }
+
+    func saveState() {
+        let state = SavedState(nextID: board.nextID, tasks: board.snapshot(), voiceSession: voice.sessionID,
+                               voiceLastUse: voice.sessionID == nil ? nil : voice.lastUse)
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601; encoder.outputFormatting = [.prettyPrinted]
+        if let data = try? encoder.encode(state) { try? data.write(to: stateURL, options: .atomic) }
+    }
+
+    func restoreState() {
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        guard let data = try? Data(contentsOf: stateURL), let state = try? decoder.decode(SavedState.self, from: data) else { return }
+        board.restore(state.tasks, nextID: state.nextID)
+        if let id = state.voiceSession { voice.restore(sessionID: id, lastUse: state.voiceLastUse ?? .distantPast) }   // resumed if recent
+        let interrupted = state.tasks.filter { $0.status == .running || $0.status == .queued }.count
+        log.write("Restored \(state.tasks.count) task(s)" + (interrupted > 0 ? ", \(interrupted) interrupted" : "")
+                  + (state.voiceSession == nil ? "" : " and the voice conversation"))
     }
 
     // Flow
@@ -2374,8 +2489,9 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
             case .start(let title, let instruction):
                 // The worker gets what the request came with (front app, window text, picture) without the voice copying it.
                 let task = board.start(title: title, instruction: [turnContext, instruction].filter { !$0.isEmpty }.joined(separator: "\n"), image: turnImage)
-                log.write("◆ #\(task.id) “\(title)”: " + instruction.replacingOccurrences(of: "\n", with: " "))
-                state.steps.append("Started #\(task.id): \(title)")
+                log.write("◆ #\(task.id) “\(title)”" + (task.status == .queued ? " (queued: \(board.limit) already running)" : "") + ": "
+                          + instruction.replacingOccurrences(of: "\n", with: " "))
+                state.steps.append((task.status == .queued ? "Queued #" : "Started #") + "\(task.id): \(title)")
             case .steer(let id, let text):
                 guard board.steer(id, text) else { continue }
                 log.write("◆ #\(id) steered: " + text)
@@ -2455,12 +2571,13 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func refreshTasks() {
         let now = Date()
-        let shown = board.tasks.filter { $0.status == .running || now.timeIntervalSince($0.ended ?? now) < 90 }.suffix(4)
+        let shown = board.tasks.filter { $0.active || now.timeIntervalSince($0.ended ?? now) < 90 }.suffix(5)
         state.tasks = shown.map { t in
-            TaskRow(id: t.id, title: t.title, status: t.status, detail: t.status == .running ? t.elapsed + (t.steps.last.map { " · " + $0 } ?? "") : t.elapsed)
+            TaskRow(id: t.id, title: t.title, status: t.status,
+                    detail: t.status == .running ? t.elapsed + (t.steps.last.map { " · " + $0 } ?? "") : t.status == .queued ? "queued" : t.elapsed)
         }
-        let running = board.running.count
-        statusItem?.button?.title = running > 0 ? " \(running)" : ""
+        let running = board.running.count, waiting = board.queued.count
+        statusItem?.button?.title = running + waiting == 0 ? "" : " \(running)" + (waiting > 0 ? "+\(waiting)" : "")
     }
 
     /// Both ⌘ keys: attach the front window (text and picture) and listen for what to do with it.
@@ -2553,13 +2670,23 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         for task in board.tasks.suffix(10).reversed() {
             let item = taskMenu.addItem(withTitle: "#\(task.id) \(task.title) — \(task.status.rawValue), \(task.elapsed)", action: nil, keyEquivalent: "")
             item.isEnabled = false
-            if task.status == .running { add(taskMenu, "    Cancel #\(task.id)") { [unowned self] in board.cancel(task.id) } }
+            if task.active { add(taskMenu, "    Cancel #\(task.id)") { [unowned self] in board.cancel(task.id) } }
         }
-        if !board.running.isEmpty {
+        if board.tasks.contains(where: \.active) {
             taskMenu.addItem(.separator())
-            add(taskMenu, "Cancel All Tasks") { [unowned self] in board.running.forEach { board.cancel($0.id) } }
+            add(taskMenu, "Cancel All Tasks") { [unowned self] in board.tasks.filter(\.active).forEach { board.cancel($0.id) } }
         }
-        let tasksItem = menu.addItem(withTitle: board.running.isEmpty ? "Tasks" : "Tasks (\(board.running.count) running)", action: nil, keyEquivalent: "")
+        taskMenu.addItem(.separator())
+        let limits = NSMenu()
+        for n in [1, 2, 3, 4, 5, 8, 10] {
+            add(limits, n == 1 ? "1 at a time" : "\(n) at once", on: board.limit == n) { [unowned self] in
+                defaults.set(n, forKey: "maxTasks"); board.limit = n
+                log.write("Parallel tasks: \(n)")
+            }
+        }
+        taskMenu.addItem(withTitle: "Parallel Tasks: \(board.limit)", action: nil, keyEquivalent: "").submenu = limits
+        let tasksTitle = board.running.isEmpty ? "Tasks" : "Tasks (\(board.running.count) running" + (board.queued.isEmpty ? ")" : ", \(board.queued.count) queued)")
+        let tasksItem = menu.addItem(withTitle: tasksTitle, action: nil, keyEquivalent: "")
         tasksItem.submenu = taskMenu
         menu.addItem(.separator())
         add(menu, "Listen for “\(wakePhrase)”", on: listener.wakeEnabled) { [unowned self] in
@@ -2751,7 +2878,7 @@ if let first = arguments.first, helperCommands.contains(first) {
         if let message = pending.first, !voice.busy {
             pending.removeFirst(); seen = 0; said = ""; filter = DirectiveFilter(); firstWord = true
             voice.send([contextLine(), board.summary(), message].joined(separator: "\n"))
-        } else if pending.isEmpty && board.running.isEmpty && !voice.busy { exit(0) }
+        } else if pending.isEmpty && !board.tasks.contains(where: \.active) && !voice.busy { exit(0) }
     }
     voice.onDone = { text, failed in
         let (speech, directives) = filter.finish()

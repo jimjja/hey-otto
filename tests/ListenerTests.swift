@@ -155,6 +155,41 @@ expect("untitled task gets a title", d.speech == "On it." && { if case .start(le
 let board = TaskBoard()
 expect("no tasks: no [Tasks] block", board.summary().isEmpty, "“\(board.summary())”")
 
+// MARK: Background tasks: the cap, the queue, saving and restoring
+
+// A stand-in for Claude Code that just keeps running (it echoes what it's sent), so tasks stay "running".
+let fakeClaude = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("otto-fake-claude-\(UUID().uuidString)")
+try! "#!/bin/sh\nexec cat\n".write(to: fakeClaude, atomically: true, encoding: .utf8)
+try! FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeClaude.path)
+UserDefaults.standard.register(defaults: ["claudePath": fakeClaude.path])   // in memory only
+
+let tasks = TaskBoard()
+tasks.limit = 2
+let one = tasks.start(title: "One", instruction: "do one"), two = tasks.start(title: "Two", instruction: "do two")
+let three = tasks.start(title: "Three", instruction: "do three")
+expect("cap: two run, the third queues", tasks.running.count == 2 && three.status == .queued, "running \(tasks.running.count), #3 \(three.status)")
+expect("the voice hears it's queued", tasks.summary().contains("#3 “Three”: queued"), tasks.summary())
+tasks.steer(three.id, "also do four")
+expect("steering a queued task adds to it", three.next.hasSuffix("Also: also do four") && three.status == .queued, three.next)
+tasks.cancel(one.id)
+expect("a free slot starts the queued task", three.status == .running && one.status == .cancelled && tasks.running.count == 2, "#3 \(three.status)")
+tasks.limit = 3
+let four = tasks.start(title: "Four", instruction: "do four")
+expect("raising the cap lets more run", four.status == .running && tasks.running.count == 3, "running \(tasks.running.count)")
+
+let saved = tasks.snapshot()
+let restored = TaskBoard()
+restored.restore(saved, nextID: tasks.nextID)
+let back = restored.tasks.first { $0.id == two.id }
+expect("restored: running tasks come back interrupted", back?.status == .interrupted && restored.tasks.first { $0.id == one.id }?.status == .cancelled,
+       restored.tasks.map { "#\($0.id) \($0.status)" }.joined(separator: ", "))
+expect("restored: numbering continues", restored.start(title: "Five", instruction: "do five").id == 5, "next id \(restored.nextID)")
+expect("the voice hears it can continue an interrupted task", restored.summary().contains("#2 “Two”: interrupted"), restored.summary())
+restored.steer(two.id, "carry on")
+expect("steering an interrupted task restarts it", back?.status == .running, "\(back?.status.rawValue ?? "missing")")
+tasks.shutdown(); restored.shutdown()
+try? FileManager.default.removeItem(at: fakeClaude)
+
 // The format `say` renders must be the one the player is connected with (it would refuse the audio otherwise).
 let file = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("otto-test-\(UUID().uuidString).caf")
 let say = Process()
