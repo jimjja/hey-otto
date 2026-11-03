@@ -2,13 +2,21 @@ name: CI
 on: [push, pull_request]
 permissions:
   contents: read
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   build-and-test:
     runs-on: macos-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        # v4, pinned to a commit so a moved tag can't change what runs here
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
+      - name: Toolchain
+        run: sw_vers && swiftc --version
       - name: Build the app bundle (icon, orb, Info.plist, ad hoc signature)
         run: OTTO_APP="$RUNNER_TEMP/Otto.app" OTTO_NO_LAUNCH=1 OTTO_ADHOC=1 ./build.sh
       - name: Check the bundle
