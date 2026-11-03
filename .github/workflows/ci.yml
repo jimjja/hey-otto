@@ -1,0 +1,17 @@
+name: CI
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  build-and-test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Build
+        run: swiftc -O -swift-version 5 -target "$(uname -m)-apple-macos14.0" Otto.swift -o Otto
+      - name: Tests (no microphone needed)
+        run: tests/run.sh
+      - name: Installer syntax
+        run: bash -n build.sh
