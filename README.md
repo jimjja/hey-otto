@@ -11,6 +11,8 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a>
 </p>
 
+<p align="center"><a href="https://github.com/jimjja/hey-otto/releases/latest/download/Otto.zip"><img src="https://img.shields.io/badge/Download-Otto.zip%20(latest%20build)-d97757?style=for-the-badge&logo=apple" alt="Download Otto (latest build)"></a></p>
+
 <p align="center"><img src="docs/panel.png" width="560" alt="Otto's panel: it heard “Check the weather and find the slides I made last week”, answered about the weather, and is still running a background task to find the slides"></p>
 
 Say “Hey Otto” and ask for anything. A fast voice answers right away and hands the real work to Claude Code agents running in the background, several at once. They use your shell, your apps, your browser and your files, and Otto keeps talking with you while they work.
@@ -49,10 +51,10 @@ When Otto first starts:
 
 To update: `git pull && ./build.sh`.
 
-**Or download a build.** Every CI run on [Actions](https://github.com/jimjja/hey-otto/actions/workflows/ci.yml) publishes the built app as an artifact named `Otto-app`, kept for 30 days. Building from source is still the better way:
+**Or download the latest build:** **[Otto.zip](https://github.com/jimjja/hey-otto/releases/latest/download/Otto.zip)**. It's rebuilt automatically from `main` after every change that passes the tests ([release page](https://github.com/jimjja/hey-otto/releases/tag/latest-build)). Building from source is still the better way:
 - **Gatekeeper blocks it.** These builds aren't signed or notarized by Apple, so macOS refuses a downloaded copy until you clear the download flag:
   ```bash
-  xattr -dr com.apple.quarantine Otto.app && mv Otto.app ~/Applications/
+  cd ~/Downloads && unzip -q Otto.zip && xattr -dr com.apple.quarantine Otto.app && mv Otto.app ~/Applications/ && open ~/Applications/Otto.app
   ```
 - **Permissions don't carry over.** Each build is signed differently, so macOS asks for its permissions again after every update.
 

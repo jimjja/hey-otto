@@ -45,3 +45,30 @@ jobs:
           path: ${{ env.ZIP }}
           retention-days: 30
           if-no-files-found: error
+
+  # Every passing build of main becomes the "latest build" release, so this link always gives the newest app:
+  # https://github.com/jimjja/hey-otto/releases/latest/download/Otto.zip
+  publish:
+    needs: build-and-test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write   # only this job may write, and only to make the release
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Download the app built above
+        # v4.3.0, pinned to a commit
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: Otto-app
+          path: dist
+      - name: Replace the latest-build release
+        run: |
+          mv dist/Otto-*.zip dist/Otto.zip
+          gh release delete latest-build --repo "$GITHUB_REPOSITORY" --cleanup-tag --yes || true
+          gh release create latest-build dist/Otto.zip --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest \
+            --title "Otto, latest build" \
+            --notes "Built automatically from $GITHUB_SHA on main. Not notarized by Apple: after unzipping, run \`xattr -dr com.apple.quarantine Otto.app\` and move it to ~/Applications. Building from source is recommended; see the README."
+
