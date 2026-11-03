@@ -31,3 +31,17 @@ jobs:
         run: tests/run.sh
       - name: Installer syntax
         run: bash -n build.sh
+      - name: Package the app
+        # ditto keeps the bundle intact (the executable bit, the signature); a plain upload would lose them
+        run: |
+          ZIP="$RUNNER_TEMP/Otto-${GITHUB_SHA::7}.zip"
+          ditto -c -k --keepParent "$RUNNER_TEMP/Otto.app" "$ZIP"
+          echo "ZIP=$ZIP" >> "$GITHUB_ENV"
+      - name: Upload the app
+        # v4.6.2, pinned to a commit
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Otto-app
+          path: ${{ env.ZIP }}
+          retention-days: 30
+          if-no-files-found: error

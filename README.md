@@ -49,6 +49,13 @@ When Otto first starts:
 
 To update: `git pull && ./build.sh`.
 
+**Or download a build.** Every CI run on [Actions](https://github.com/jimjja/hey-otto/actions/workflows/ci.yml) publishes the built app as an artifact named `Otto-app`, kept for 30 days. Building from source is still the better way:
+- **Gatekeeper blocks it.** These builds aren't signed or notarized by Apple, so macOS refuses a downloaded copy until you clear the download flag:
+  ```bash
+  xattr -dr com.apple.quarantine Otto.app && mv Otto.app ~/Applications/
+  ```
+- **Permissions don't carry over.** Each build is signed differently, so macOS asks for its permissions again after every update.
+
 ## Use
 
 | Say or do | What happens |
