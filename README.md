@@ -1,8 +1,19 @@
 <p align="center"><img src="AppIcon.png" width="128" alt="Otto"></p>
 
-# Otto
+<h1 align="center">Otto</h1>
 
-**A voice assistant for your Mac, powered by Claude Code.** Say “Hey Otto” and ask for anything. A fast voice answers right away and hands the real work to Claude Code agents running in the background, several at once. They use your shell, your apps, your browser and your files, and Otto keeps talking with you while they work.
+<p align="center"><b>Say “Hey Otto”. A voice assistant for your Mac, powered by Claude Code.</b></p>
+
+<p align="center">
+  <a href="https://github.com/jimjja/hey-otto/actions/workflows/ci.yml"><img src="https://github.com/jimjja/hey-otto/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <img src="https://img.shields.io/badge/macOS-14%2B-111111?logo=apple" alt="macOS 14+">
+  <img src="https://img.shields.io/badge/powered%20by-Claude%20Code-d97757" alt="Powered by Claude Code">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT license"></a>
+</p>
+
+<p align="center"><img src="docs/panel.png" width="560" alt="Otto's panel: it heard “Check the weather and find the slides I made last week”, answered about the weather, and is still running a background task to find the slides"></p>
+
+Say “Hey Otto” and ask for anything. A fast voice answers right away and hands the real work to Claude Code agents running in the background, several at once. They use your shell, your apps, your browser and your files, and Otto keeps talking with you while they work.
 
 - **Talks while it works.** “Check the weather and find the slides I made last week”: Otto replies in about two seconds, starts two background tasks, and tells you each result as it lands.
 - **You stay in charge of the agents.** Ask “how's the slides one going?”, “also check tomorrow” or “cancel the report”. Tasks show in the panel and the menu bar.
@@ -22,8 +33,8 @@ Otto is an independent project. It isn't made by or affiliated with Anthropic.
 ## Install
 
 ```bash
-git clone https://github.com/jimjja/otto.git
-cd otto
+git clone https://github.com/jimjja/hey-otto.git
+cd hey-otto
 ./build.sh
 ```
 
