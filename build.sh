@@ -9,7 +9,7 @@ xcode-select -p >/dev/null 2>&1 || { echo "Otto needs Apple's command line tools
 command -v claude >/dev/null || [ -x "$HOME/.local/bin/claude" ] || [ -x /opt/homebrew/bin/claude ] ||
   echo "Note: Claude Code isn't installed yet. Otto needs it: https://claude.com/claude-code"
 
-APP="$HOME/Applications/Otto.app"
+APP="${OTTO_APP:-$HOME/Applications/Otto.app}"   # OTTO_APP: build somewhere else (CI, testing)
 STAGE=$(mktemp -d)
 trap 'rm -rf "$STAGE"' EXIT
 # Compile first, so a compiler error leaves the installed app alone.
@@ -42,8 +42,9 @@ mv "$STAGE/Otto" "$APP/Contents/MacOS/Otto"
 # (an ad hoc signature changes every build, so macOS would ask again each time). It is made once, in your login keychain.
 # The key isn't pre-authorized for codesign, so other software can't silently sign as this app: macOS asks the
 # first time a build uses it. Click "Always Allow".
+# OTTO_ADHOC=1 (CI, testing): skip the keychain and sign ad hoc.
 NAME="Otto Local Signing"
-if ! security find-identity -p codesigning | grep -q "$NAME"; then
+if [ -z "${OTTO_ADHOC:-}" ] && ! security find-identity -p codesigning | grep -q "$NAME"; then
   K=$(mktemp -d)
   PASS=$(/usr/bin/openssl rand -hex 16)
   /usr/bin/openssl req -x509 -newkey rsa:2048 -nodes -days 3650 -subj "/CN=$NAME" \
@@ -53,7 +54,7 @@ if ! security find-identity -p codesigning | grep -q "$NAME"; then
   security import "$K/id.p12" -P "$PASS" -k "$HOME/Library/Keychains/login.keychain-db" >/dev/null || echo "Couldn't add a signing identity; using ad hoc signing."
   rm -rf "$K"
 fi
-if security find-identity -p codesigning | grep -q "$NAME"; then
+if [ -z "${OTTO_ADHOC:-}" ] && security find-identity -p codesigning | grep -q "$NAME"; then
   codesign --force --sign "$NAME" "$APP"
 else
   codesign --force --sign - "$APP"
